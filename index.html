@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PDF Studio - Free PDF Editor</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#15233d;background:#f2f5fa}
+    *{box-sizing:border-box}body{margin:0}header{background:#152544;color:#fff;padding:18px 24px}
+    header b{font-size:22px}header span{font-size:13px;color:#cbd8ef;margin-left:8px}
+    main{max-width:1200px;margin:22px auto;padding:0 16px}.toolbar,.pager{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+    button,.file-button{font:inherit;background:white;border:1px solid #cbd5e3;border-radius:9px;padding:10px 13px;cursor:pointer;color:inherit}
+    button:hover,.file-button:hover{border-color:#5375c6}button.active{background:#e1eafe;border-color:#3768d0}
+    button.primary{background:#2857c6;color:white;border-color:#2857c6}button:disabled{opacity:.5;cursor:not-allowed}
+    .file-button input{display:none}.content{display:grid;grid-template-columns:minmax(0,1fr) 270px;gap:20px;align-items:start}
+    .viewer{min-width:0;background:#e6eaf2;border:1px solid #d2d9e6;border-radius:13px;padding:14px;overflow:auto;text-align:center;min-height:360px}
+    #page{position:relative;margin:0 auto;background:white;box-shadow:0 5px 24px #17284435;display:none;touch-action:none}
+    #pdfCanvas{display:block}#layer{position:absolute;inset:0;cursor:crosshair}
+    .stamp{position:absolute;cursor:move;user-select:none;touch-action:none}.stamp.selected{outline:2px dashed #255cda;outline-offset:2px}
+    aside{background:white;border:1px solid #d6dfea;border-radius:13px;padding:16px}aside h2{font-size:16px;margin:0 0 8px}
+    aside p,#status{font-size:13px;color:#56657b;line-height:1.5}#status{margin:8px 0 15px;min-height:20px}
+    label.field{display:block;font-size:13px;font-weight:600;margin-top:13px}textarea,input[type=number],input[type=color]{width:100%;font:inherit;margin-top:6px;border:1px solid #cbd5e3;border-radius:7px;padding:8px}
+    input[type=color]{height:42px;padding:3px}#signPad{display:block;width:100%;height:auto;border:1px dashed #a7b4c8;border-radius:8px;touch-action:none;background:#fff;margin:8px 0}
+    .sign-actions{display:flex;gap:7px}.sign-actions button{flex:1;padding:7px 6px;font-size:12px}
+    .help{font-size:12px;color:#59677d}.pager{justify-content:center}.hint{padding:100px 15px;color:#64748b}
+    @media(max-width:760px){.content{grid-template-columns:1fr}header span{display:block;margin:3px 0 0}aside{order:-1}.viewer{min-height:220px}}
+  </style>
+</head>
+<body>
+<header><b>PDF Studio</b><span>Edit, sign and download PDFs in your browser</span></header>
+<main>
+  <div class="toolbar">
+    <label class="file-button">📄 Open PDF <input id="file" type="file" accept="application/pdf,.pdf"></label>
+    <button data-tool="text" class="active">Add text</button>
+    <button data-tool="signature">Signature</button>
+    <button data-tool="check">✓ Checkmark</button>
+    <button data-tool="date">Date</button>
+    <button id="delete">Delete selected</button>
+    <button id="export" class="primary">⬇ Download edited PDF</button>
+  </div>
+  <div id="status" role="status">Open a PDF to begin. The document is processed on your device.</div>
+  <div class="pager"><button id="prev">← Previous</button><span id="pageCount">Page 0 of 0</span><button id="next">Next →</button></div>
+  <div class="content">
+    <section class="viewer" id="viewer" aria-label="PDF preview">
+      <div id="hint" class="hint">Your PDF will appear here after uploading.</div>
+      <div id="page"><canvas id="pdfCanvas"></canvas><div id="layer"></div></div>
+    </section>
+    <aside>
+      <h2>Add content</h2>
+      <p>Choose a tool above, then click the page to place it. Drag an item to move it, or select and delete it.</p>
+      <label class="field" for="words">Text or typed signature</label>
+      <textarea id="words" rows="3" placeholder="Type here..."></textarea>
+      <label class="field" for="fontSize">Font size (points)</label>
+      <input id="fontSize" type="number" value="20" min="8" max="100">
+      <label class="field" for="ink">Ink color</label>
+      <input id="ink" type="color" value="#15233d">
+      <label class="field">Draw your signature</label>
+      <canvas id="signPad" width="480" height="150" aria-label="Signature drawing area"></canvas>
+      <div class="sign-actions"><button id="clearSign">Clear drawing</button><button id="useSign">Use drawing</button></div>
+      <p class="help">For a handwritten signature, draw above and press “Use drawing”, then click the PDF. Alternatively, choose Signature and type your name.</p>
+      <p class="help">This creates a visible signature, not a cryptographically certified digital signature. Original PDF text is not directly changed in this version.</p>
+    </aside>
+  </div>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+<script type="module">
+  import * as pdfjs from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs';
+  pdfjs.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs';
+
+  const $ = id => document.getElementById(id);
+  const canvas = $('pdfCanvas'), layer = $('layer'), holder = $('page');
+  const setStatus = msg => {$('status').textContent=msg};
+  let source=null, filename='document.pdf', pdf=null, pageNumber=1, pageWidth=1, pageHeight=1, scale=1;
+  let stamps=[], selected=null, tool='text', drawnSignature=null;
+
+  function activate(next){
+    tool=next;
+    document.querySelectorAll('[data-tool]').forEach(b=>b.classList.toggle('active',b.dataset.tool===tool));
+  }
+  document.querySelectorAll('[data-tool]').forEach(b=>b.addEventListener('click',()=>activate(b.dataset.tool)));
+
+  // Turn text into a transparent PNG. This preserves the appearance and Unicode glyphs on export.
+  function textImage(value, handwritten=false){
+    const fontSize=Math.max(8,Math.min(100,Number($('fontSize').value)||20));
+    const family=handwritten?'"Brush Script MT","Segoe Script",cursive':'Arial,sans-serif';
+    const rows=value.split('\n');
+    const probe=document.createElement('canvas').getContext('2d');
+    probe.font=`${fontSize}px ${family}`;
+    const w=Math.max(15,Math.ceil(Math.max(...rows.map(x=>probe.measureText(x).width))+12));
+    const h=Math.max(15,Math.ceil(rows.length*fontSize*1.4+8));
+    const c=document.createElement('canvas');c.width=Math.min(4096,w*2);c.height=Math.min(4096,h*2);
+    const ctx=c.getContext('2d');ctx.scale(c.width/w,c.height/h);
+    ctx.font=`${fontSize}px ${family}`;ctx.textBaseline='top';ctx.fillStyle=$('ink').value;
+    rows.forEach((r,i)=>ctx.fillText(r,5,4+i*fontSize*1.4));
+    return {src:c.toDataURL('image/png'),w,h};
+  }
+
+  async function drawPage(){
+    if(!pdf)return;
+    const page=await pdf.getPage(pageNumber);
+    const unit=page.getViewport({scale:1});
+    pageWidth=unit.width;pageHeight=unit.height;
+    scale=Math.min(1.6,Math.max(.25,($('viewer').clientWidth-32)/unit.width));
+    const view=page.getViewport({scale});
+    const pixelRatio=Math.min(2,window.devicePixelRatio||1);
+    canvas.width=Math.round(view.width*pixelRatio);canvas.height=Math.round(view.height*pixelRatio);
+    canvas.style.width=`${view.width}px`;canvas.style.height=`${view.height}px`;
+    holder.style.width=`${view.width}px`;holder.style.height=`${view.height}px`;
+    const context=canvas.getContext('2d');
+    await page.render({canvasContext:context,viewport:view,transform:[pixelRatio,0,0,pixelRatio,0,0]}).promise;
+    holder.style.display='block';$('hint').style.display='none';
+    $('pageCount').textContent=`Page ${pageNumber} of ${pdf.numPages}`;
+    $('prev').disabled=pageNumber===1;$('next').disabled=pageNumber===pdf.numPages;
+    paintStamps();
+  }
+
+  function paintStamps(){
+    layer.replaceChildren();
+    for(const stamp of stamps.filter(s=>s.page===pageNumber)){
+      const img=document.createElement('img');img.src=stamp.src;img.className='stamp'+(selected===stamp?' selected':'');
+      img.draggable=false;img.alt='Added PDF content';
+      img.style.left=`${stamp.x*pageWidth*scale}px`;img.style.top=`${stamp.y*pageHeight*scale}px`;
+      img.style.width=`${stamp.w*scale}px`;img.style.height=`${stamp.h*scale}px`;
+      layer.append(img);
+      img.addEventListener('pointerdown',event=>{
+        event.preventDefault();event.stopPropagation();selected=stamp;layer.querySelectorAll('.stamp').forEach(el=>el.classList.remove('selected'));img.classList.add('selected');
+        const initialX=event.clientX,initialY=event.clientY,x=stamp.x,y=stamp.y;
+        const move=ev=>{
+          stamp.x=Math.max(0,Math.min(1-stamp.w/pageWidth,x+(ev.clientX-initialX)/(pageWidth*scale)));
+          stamp.y=Math.max(0,Math.min(1-stamp.h/pageHeight,y+(ev.clientY-initialY)/(pageHeight*scale)));
+          img.style.left=`${stamp.x*pageWidth*scale}px`;img.style.top=`${stamp.y*pageHeight*scale}px`;
+        };
+        const end=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',end);};
+        window.addEventListener('pointermove',move);window.addEventListener('pointerup',end,{once:true});
+      });
+    }
+  }
+
+  $('file').addEventListener('change',async ev=>{
+    const file=ev.target.files?.[0];if(!file)return;
+    try{
+      setStatus('Opening PDF…');source=await file.arrayBuffer();filename=file.name;
+      pdf=await pdfjs.getDocument({data:new Uint8Array(source.slice(0))}).promise;
+      stamps=[];selected=null;pageNumber=1;await drawPage();
+      setStatus(`Loaded ${filename}. Add text or a signature by clicking the page.`);
+    }catch(e){pdf=null;source=null;setStatus(`Could not open PDF: ${e.message}`);}
+  });
+
+  layer.addEventListener('click',ev=>{
+    if(!pdf||ev.target!==layer)return;
+    let image;
+    if(tool==='signature'&&drawnSignature){image=drawnSignature;}
+    else{
+      const value=tool==='check'?'✓':tool==='date'?new Date().toLocaleDateString():$('words').value.trim();
+      if(!value){setStatus('Enter your text or draw a signature first.');return;}
+      image=textImage(value,tool==='signature');
+    }
+    const rect=layer.getBoundingClientRect();
+    const x=(ev.clientX-rect.left)/(pageWidth*scale),y=(ev.clientY-rect.top)/(pageHeight*scale);
+    selected={...image,page:pageNumber,x:Math.max(0,Math.min(1-image.w/pageWidth,x)),y:Math.max(0,Math.min(1-image.h/pageHeight,y))};
+    stamps.push(selected);paintStamps();setStatus('Content placed. You can drag it to adjust its position.');
+  });
+  $('delete').addEventListener('click',()=>{if(selected){stamps=stamps.filter(s=>s!==selected);selected=null;paintStamps();}});
+  $('prev').addEventListener('click',()=>{if(pdf&&pageNumber>1){pageNumber--;selected=null;drawPage();}});
+  $('next').addEventListener('click',()=>{if(pdf&&pageNumber<pdf.numPages){pageNumber++;selected=null;drawPage();}});
+  window.addEventListener('keydown',ev=>{if((ev.key==='Delete'||ev.key==='Backspace')&&selected&&!['INPUT','TEXTAREA'].includes(document.activeElement.tagName)){$('delete').click();}});
+
+  // Mouse, pen and touch signature pad.
+  const pad=$('signPad'),ctx=pad.getContext('2d');ctx.strokeStyle='#15233d';ctx.lineWidth=3;ctx.lineCap='round';ctx.lineJoin='round';
+  let signing=false,hasInk=false;
+  function point(ev){const rect=pad.getBoundingClientRect();return {x:(ev.clientX-rect.left)*pad.width/rect.width,y:(ev.clientY-rect.top)*pad.height/rect.height};}
+  pad.addEventListener('pointerdown',ev=>{ev.preventDefault();pad.setPointerCapture(ev.pointerId);const p=point(ev);ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(p.x+.1,p.y+.1);ctx.stroke();signing=true;hasInk=true;});
+  pad.addEventListener('pointermove',ev=>{if(!signing)return;const p=point(ev);ctx.lineTo(p.x,p.y);ctx.stroke();});
+  const stop=()=>signing=false;pad.addEventListener('pointerup',stop);pad.addEventListener('pointercancel',stop);
+  $('clearSign').addEventListener('click',()=>{ctx.clearRect(0,0,pad.width,pad.height);hasInk=false;drawnSignature=null;setStatus('Signature drawing cleared.');});
+  $('useSign').addEventListener('click',()=>{
+    if(!hasInk){setStatus('Draw your signature in the box first.');return;}
+    drawnSignature={src:pad.toDataURL('image/png'),w:200,h:62.5};activate('signature');
+    setStatus('Signature ready. Click the PDF to place it.');
+  });
+
+  $('export').addEventListener('click',async()=>{
+    if(!source){setStatus('Open a PDF first.');return;}
+    const btn=$('export');btn.disabled=true;
+    try{
+      setStatus('Preparing your edited PDF…');
+      const doc=await PDFLib.PDFDocument.load(source.slice(0));
+      for(const s of stamps){
+        const p=doc.getPage(s.page-1),size=p.getSize();
+        const img=await doc.embedPng(s.src);
+        // Coordinates map screen top-left to PDF bottom-left on ordinary (unrotated) pages.
+        const x=s.x*size.width,y=size.height-s.y*size.height-s.h;
+        p.drawImage(img,{x,y,width:s.w,height:s.h});
+      }
+      const bytes=await doc.save();
+      const url=URL.createObjectURL(new Blob([bytes],{type:'application/pdf'}));
+      const link=document.createElement('a');link.href=url;link.download=filename.replace(/\.pdf$/i,'')+'-edited.pdf';
+      document.body.append(link);link.click();link.remove();
+      setTimeout(()=>URL.revokeObjectURL(url),15000);
+      setStatus('Your edited PDF has been downloaded.');
+    }catch(e){setStatus(`Export failed: ${e.message}`);}finally{btn.disabled=false;}
+  });
+  $('prev').disabled=true;$('next').disabled=true;
+</script>
+</body>
+</html>
